@@ -40,6 +40,7 @@ sub all {
         push @results, $class->zone08( $zone ) if Zonemaster->config->should_run( 'zone08' );
         if ( none { $_->tag eq q{NO_RESPONSE_MX_QUERY} } @results ) {
             push @results, $class->zone09( $zone ) if Zonemaster->config->should_run( 'zone09' );
+            push @results, $class->zone10( $zone ) if Zonemaster->config->should_run( 'zone10' );
         }
     }
 
@@ -123,6 +124,14 @@ sub metadata {
               NO_RESPONSE_MX_QUERY
               )
         ],
+        zone10 => [
+            qw(
+              NO_MX_RECORD
+              MX_HOST_RECORD_EXISTS
+              MX_RECORD_EXISTS
+              NO_RESPONSE_MX_QUERY
+              )
+        ],
     };
 } ## end sub metadata
 
@@ -136,6 +145,7 @@ sub translation {
         'MNAME_IS_CNAME'     => 'SOA \'mname\' value ({mname}) refers to a NS which is an alias (CNAME).',
         'MNAME_IS_NOT_CNAME' => 'SOA \'mname\' value ({mname}) refers to a NS which is not an alias (CNAME).',
         'NO_MX_RECORD'       => 'No target (MX, A or AAAA record) to deliver e-mail for the domain name.',
+        'MX_HOST_RECORD_EXISTS'   => 'Target ({info}) found for the MX host ({mx})',
         'MX_RECORD_EXISTS'   => 'Target ({info}) found to deliver e-mail for the domain name.',
         'REFRESH_MINIMUM_VALUE_LOWER' =>
           'SOA \'refresh\' value ({refresh}) is less than the recommended one ({required_refresh}).',
@@ -555,6 +565,65 @@ sub zone09 {
     return @results;
 } ## end sub zone09
 
+sub zone10 {
+    my ( $class, $zone ) = @_;
+    my @results;
+    my @host_results;
+    my $info;
+
+    my $p = $zone->query_auth( $zone->name, q{MX} );
+
+    if ( $p ) {
+        if ( not $p->has_rrs_of_type_for_name( q{MX}, $zone->name ) ) {
+            my $p_a    = _retrieve_record_from_zone( $zone, $zone->name, q{A} );
+            my $p_aaaa = _retrieve_record_from_zone( $zone, $zone->name, q{AAAA} );
+            if (
+                ( not defined $p_a and not defined $p_aaaa )
+                or (    ( not defined $p_a or not $p_a->has_rrs_of_type_for_name( q{A}, $zone->name ) )
+                    and ( not defined $p_aaaa or not $p_aaaa->has_rrs_of_type_for_name( q{AAAA}, $zone->name ) ) )
+              )
+            {
+                push @results, info( NO_MX_RECORD => {} );
+            }
+            else {
+                my @as = defined $p_a ? $p_a->get_records_for_name( q{A}, $zone->name ) : ();
+                my @aaas = defined $p_aaaa ? $p_aaaa->get_records_for_name( q{AAAA}, $zone->name ) : ();
+                $info = join q{/}, map { $_ =~ /:/smx ? q{AAAA=} . $_->address : q{A=} . $_->address } ( @as, @aaas );
+                $info .= '/TTL=' . ( $as[0]->ttl // $aaas[0]->ttl );
+            }
+        }
+        else {
+            my @mx = $p->get_records_for_name( q{MX}, $zone->name );
+            for my $mx ( @mx ) {
+                my $tmp = q{MX=};
+                $tmp .= $mx->exchange;
+                $tmp =~ s/[.]\z//smx;
+                $info .= $tmp . q{/};
+
+                # Get information about the A/AAAA records for the hosts
+                my @p = (
+                    Zonemaster::Recursor->recurse( $mx->exchange, q{A},    q{IN} ),
+                    Zonemaster::Recursor->recurse( $mx->exchange, q{AAAA}, q{IN} )
+                );
+                my $e_info = join q{/}, map { $_ =~ /:/smx ? q{AAAA=} . $_ : q{A=} . $_ }
+                  map { ( $_->answer )[0]->address } ( @p );
+                $e_info .= '/TTL=' . ( $p[0]->answer )[0]->ttl;
+                push @host_results, info( MX_HOST_RECORD_EXISTS => { info => $e_info, mx => $mx->exchange } );
+
+            }
+            $info .= 'TTL=' . $mx[0]->ttl;
+        } ## end else [ if ( not $p->has_rrs_of_type_for_name...)]
+        if ( not scalar @results ) {
+            push @results, info( MX_RECORD_EXISTS => { info => $info } ), @host_results;
+        }
+    } ## end if ( $p )
+    else {
+        push @results, info( NO_RESPONSE_MX_QUERY => {} );
+    }
+
+    return @results;
+} ## end sub zone10
+
 sub _retrieve_record_from_zone {
     my ( $zone, $name, $type ) = @_;
 
@@ -663,6 +732,11 @@ Verify that MX records does not resolve to a CNAME.
 =item zone09($zone)
 
 Verify that there is a target host (MX, A or AAAA) to deliver e-mail for the domain name.
+
+=item zone10($zone)
+
+Verify that there is a target host (MX, A or AAAA) to deliver e-mail for the
+domain name, and return information about the hosts, including TTL information.
 
 =back
 
