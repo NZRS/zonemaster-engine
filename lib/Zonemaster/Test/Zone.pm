@@ -43,6 +43,9 @@ sub all {
             push @results, $class->zone10( $zone ) if Zonemaster->config->should_run( 'zone10' );
         }
     }
+    if ( none { $_->tag eq q{NO_RESPONSE_SOA_QUERY} } @results ) {
+        push @results, $class->zone11( $zone ) if Zonemaster->config->should_run( 'zone11' );
+    }
 
     return @results;
 } ## end sub all
@@ -132,6 +135,12 @@ sub metadata {
               NO_RESPONSE_MX_QUERY
               )
         ],
+        zone11 => [
+            qw(
+              NSID_VALUE_SET
+              NSID_VALUE_MISSING
+            )
+        ],
     };
 } ## end sub metadata
 
@@ -178,6 +187,8 @@ sub translation {
         'MNAME_HAS_NO_ADDRESS'   => 'No IP address found for SOA \'mname\' nameserver ({mname}).',
         'EXPIRE_MINIMUM_VALUE_OK' =>
 'SOA \'expire\' value ({expire}) is higher than the minimum recommended value ({required_expire}) and not lower than the \'refresh\' value ({refresh}).',
+        NSID_VALUE_SET => "NSID record found on nameserver '{ns}' for domain '{domain}': {nsid}",
+        NSID_VALUE_MISSING => "No NSID record found on nameserver '{ns}' for domain '{domain}'",
     };
 } ## end sub translation
 
@@ -624,6 +635,41 @@ sub zone10 {
     return @results;
 } ## end sub zone10
 
+sub zone11 {
+    my ( $class, $zone ) = @_;
+    my @results;
+
+    foreach my $ns ( @{ Zonemaster::TestMethods->method5( $zone ) } ) {
+
+        if ( _is_ip_version_disabled( $ns ) ) {
+            next;
+        }
+
+        my $p = $ns->query( 'ID.SERVER', 'TXT', { class => q{CH} } );
+        if ( defined $p and $p->aa and scalar $p->get_records( q{TXT}, q{answer} ) > 0 ) {
+            push @results,
+              info(
+                NSID_VALUE_SET => {
+                    domain => $zone->name->string,
+                    ns     => $ns->string,
+                    nsid   => ( $p->answer )[0]->txtdata(),
+                }
+              );
+        }
+        else {
+            push @results,
+              info(
+                NSID_VALUE_MISSING => {
+                    domain => $zone->name->string,
+                    ns     => $ns->string,
+                }
+              );
+        }
+    } ## end foreach my $ns ( @{ Zonemaster::TestMethods...})
+
+    return @results;
+} ## end sub zone11
+
 sub _retrieve_record_from_zone {
     my ( $zone, $name, $type ) = @_;
 
@@ -737,6 +783,10 @@ Verify that there is a target host (MX, A or AAAA) to deliver e-mail for the dom
 
 Verify that there is a target host (MX, A or AAAA) to deliver e-mail for the
 domain name, and return information about the hosts, including TTL information.
+
+=item zone11($zone)
+
+Returns the NSID records for each of the name servers for the domain name
 
 =back
 
